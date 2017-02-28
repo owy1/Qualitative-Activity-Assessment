@@ -1,0 +1,110 @@
+---
+title: "Qualitiative Activity Assessment"
+author: "Ophelia"
+date: "January 24, 2017"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, fig.paht='Figs/', message=FALSE, warning=FALSE)
+```
+
+## Synopsis
+This is a Coursera Machine Learning course project write-up to evaluate weight lifting exercise. The premise of the study and dataset can be found in Human Activity Recognition (HAR), http://groupware.les.inf.puc-rio.br/har.  The data being studied here is a subset from HAR and are downloaded from:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The training data are compiled from sensors set up in belt, glove, arm-band and dumbbell worn by research subjects. Responses were recorded during ten repetitions of the Unilateral Dumbbell Bisceps Curl with a barbell in five different classifications: Classes A, B, C, D and E. Class A being the correct execution and the other classes simulate common mistakes by novices. The course instruction is to use readings from the accelerometers only for prediction model, which reduces the parameters from 160 to 20 plus "classe" as output.  In this report I'll describe how I build my model with a training set with cross-validation, perfrom prediction on a testing set (both sets are split from pml-training.csv), and show overall prediction accuracy.  I'll combine predictions from three models: Random Forest, generalized Boosted Regression and Support Vector Machine using Random Forest to predict the 20 test cases from:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+## Reading in the data and multivariate visualization
+```{r chunk_dataSplit, cache=TRUE}
+
+setwd("~/Desktop/Coursera/Machine_Learning/course_project_quiz") # set working directory to data folder 
+datasetMOD <- read.csv("pml-training.csv") #19622x160
+datasetTEST <- read.csv("pml-testing.csv") #20X160
+library(ggplot2);library(caret)
+set.seed(1234)
+inTrain <- createDataPartition(y=datasetMOD$classe,p=0.7,list=FALSE)
+training <- datasetMOD[inTrain,] #13737X160
+testing <- datasetMOD[-inTrain,] #5885X160
+#grep "accel" and "classe" columns
+trainingSub <- training[,grepl('^accel|_accel|classe',names(training))]#13737X21
+testingSub <- testing[,grepl('^accel|_accel|classe',names(testing))]#5885X21
+#remove variance columns since they're mostly NA
+myvars <- names(trainingSub) %in% c("var_total_accel_belt","var_accel_arm","var_accel_dumbbell","var_accel_forearm")
+newdata<-trainingSub[!myvars] #13737X17
+
+#data visualization
+featurePlot(x=trainingSub[,1:20],y=trainingSub[,21],plot="density",scales=list(s=list(relation="free"),y=list(relation="free")),auto.key=list(columns=5)) #feature density plot
+library(corrplot)
+correlations <- cor(newdata[,1:16]) #correlation matrix plot
+corrplot(correlations,method = "circle")
+
+```
+
+
+We see that some of the variables are highly correlated from both the feature density and the correlation matrix plots.
+
+## Variable Selection
+```{r chunk_varSel, cache=TRUE}
+
+correlationMatrix <- cor(newdata[,1:16],use="pairwise.complete.obs")
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.8)
+print(highlyCorrelated)  
+library(randomForest)
+modFitrf <- randomForest(classe~., data=newdata)
+varImpmodFitrf <- varImp(modFitrf)
+varImpmodFitrf = data.frame(var=1:nrow(varImpmodFitrf),imp=varImpmodFitrf$Overall)
+varImpmodFitrf[order(varImpmodFitrf$imp,decreasing = TRUE),] 
+
+```
+We see that var 3 and 4 (accel_y_belt and accel_z_belt, respectively) are highly correlated. Since var 3 is at the lower end of the random forest variable importance measures (imp ~ 487) we would not include it in model in order to reduce pair-wise correlation.  Next we'll use three techniques with Built-in feature selection: rf, gbm, and svm, to build a diverse model. I apply 5-fold cross-validation on models.
+
+## Build models and predictions
+```{r chunk_mod, cache=TRUE}
+
+newdata <- subset(newdata, select = -3) #taking out var 3 from dataset
+library(gbm)
+library(e1071)
+set.seed(62433)
+fitRF <- train(classe~., data=newdata, method='rf', trControl=trainControl(method='cv', number=5),prox=TRUE,allowParallel=TRUE)
+fitGBM <- train(classe~., data=newdata,method='gbm',trControl=trainControl(method='cv', number=5),verbose=FALSE)
+fitSVM <- svm(classe~., data=newdata, trControl=trainControl(method='cv', number=5))
+myvars <- names(testingSub) %in% c("var_total_accel_belt","var_accel_arm","var_accel_dumbbell","var_accel_forearm","accel_belt_y")
+newtest <- testingSub[!myvars] #5885x16
+predGBM <- predict(fitGBM,newtest)
+predRF <- predict(fitRF,newtest)
+predSVM <- predict(fitSVM,newtest)
+predCombo <- data.frame(predGBM,predRF,predSVM, classe=newtest$classe)
+comModFit <- train(classe~., method='rf', data=predCombo,trControl=trainControl(method='cv', number=5))
+comPred <- predict(comModFit,predCombo)
+confusionMatrix(comPred,newtest$classe)$overall['Accuracy']
+
+```
+The stacked model accuracy: 0.94 is better than both the boosting (0.82) and support vector machine (0.80), the same as random forest (codes not shown).
+
+## Apply prediction models to pmi-testing test cases
+```{r chunk_test, cache=TRUE}
+
+newdatasetTEST <- datasetTEST[,grepl('^accel|_accel|problem_id',names(datasetTEST))]
+myvars <- names(newdatasetTEST) %in% c("var_total_accel_belt","var_accel_arm","var_accel_dumbbell","var_accel_forearm","accel_belt_y")
+newdatasetTEST <- newdatasetTEST[!myvars] #20x16
+testPredRF <- predict(fitRF,newdata=newdatasetTEST)
+# [1] B A C A A E D B A A B C B A E E A B B B
+#Levels: A B C D E
+testPredGBM <- predict(fitGBM,newdata=newdatasetTEST)
+# [1] A A C A C E D B A A A C B A E B A D C B
+# Levels: A B C D E
+testPredSVM <- predict(fitSVM,newdata=newdatasetTEST)
+# 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+# C  A  C  A  A  E  D  B  A  A  A  C  B  A  E  E  A  B  B  B 
+#Levels: A B C D E
+testPredCombo <- data.frame(testPredGBM,testPredSVM,classe=testPredRF)
+testcomModFit <- train(classe~., method='rf', data=testPredCombo,trControl=trainControl(method='cv', number=5))
+testPred <- predict(testcomModFit,newdata=newdatasetTEST)
+testPred
+
+```
+## Discussion
+I have explored many other techniques for variable selection and prediction besides those mentioned above. They either didn't render results that I need or the results are just confusing/redundant.  It was sort of disappointing that the stacked model doesn't perform better than random forest. Perhaps a more sophisticated blending technique would improve accuracy over the simplifed blending procedure above.  
+
+
